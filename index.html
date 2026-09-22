@@ -67,6 +67,7 @@
       <b>Rechter Stick</b><span>Drehen in 30°-Schritten</span>
       <b>Trigger halten</b><span>Schneller gehen</span>
       <b>A / X</b><span>Zurück zum Startpunkt</span>
+      <b>Augenhöhe</b><span id="eyeinfo">1,60 m</span>
     </div>
     <div class="keys" id="keys-pc" style="display:none">
       <b>W A S D</b><span>Gehen</span>
@@ -107,7 +108,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 /* ---------- Parameter ---------- */
 const P            = new URLSearchParams(location.search);
 const MODEL_URL    = P.get('model') || './model.glb';
-const EYE_HEIGHT   = 1.65;   // m, nur Desktop – in VR liefert das Headset die echte Höhe
+const EYE_HEIGHT   = parseFloat(P.get('eye') || '1.60');  // Augenhöhe in m (Person ~1,70 m); per ?eye=1.75 anpassbar
 const WALK_SPEED   = 1.5;    // m/s
 const RUN_SPEED    = 3.2;
 const BODY_RADIUS  = 0.32;   // m, Abstand zu Wänden
@@ -170,6 +171,8 @@ function showHint(t, ms = 3200){
 /* ---------- Modell laden ---------- */
 const collidables = [];
 let startPos = new THREE.Vector3(0, 0, 0);
+let floorY   = 0;   // Höhe des Bodens unter dem Betrachter
+let eyeComp  = 0;   // Ausgleich, falls die Brille keine Bodenreferenz liefert
 
 const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
 
@@ -211,6 +214,8 @@ loader.load(MODEL_URL,
     camera.far     = span * 6 + 50;
     camera.updateProjectionMatrix();
 
+    const ei = document.getElementById('eyeinfo');
+    if (ei) ei.textContent = EYE_HEIGHT.toFixed(2).replace('.', ',') + ' m';
     sub.textContent = 'Bereit.';
     stat.textContent =
       `${(tris/1000).toFixed(0)}k Dreiecke · Ausdehnung ${size.x.toFixed(1)} × ${size.z.toFixed(1)} m · Höhe ${size.y.toFixed(1)} m`;
@@ -302,8 +307,17 @@ addEventListener('mousemove', e => {
 
 function resetPose(){
   rig.position.copy(startPos);
+  floorY = startPos.y;
   rig.rotation.set(0,0,0);
   yaw = 0; pitch = 0;
+}
+
+// Liefert die Brille 'local-floor', steht das Auge schon richtig über dem Rig-
+// Ursprung. Tut sie das nicht (Quest fällt dann auf 'local' zurück), sitzt es
+// bei 0 – und der Betrachter klebt am Boden. Das gleichen wir hier aus.
+function updateEyeHeight(){
+  const localEye = camera.position.y;
+  eyeComp = localEye < 0.6 ? (EYE_HEIGHT - localEye) : 0;
 }
 
 /* ---------- Bewegung mit Boden- und Wandprüfung ---------- */
@@ -329,8 +343,8 @@ function stickTo(dir, amount, dt){
   const dist = amount * dt;
   camera.getWorldPosition(headWorld);
   // Prüfhöhen: Brust und Knie – verhindert Durchlaufen von Wänden und Brüstungen
-  const chest = headWorld.clone(); chest.y = rig.position.y + 1.1;
-  const knee  = headWorld.clone(); knee.y  = rig.position.y + 0.45;
+  const chest = headWorld.clone(); chest.y = floorY + 1.1;
+  const knee  = headWorld.clone(); knee.y  = floorY + 0.45;
   if (blocked(chest, dir, dist) || blocked(knee, dir, dist)) return;
   rig.position.addScaledVector(dir, dist);
 }
@@ -338,11 +352,12 @@ function stickTo(dir, amount, dt){
 function followFloor(){
   if (NO_CLIP || !collidables.length) return;
   camera.getWorldPosition(headWorld);
-  rayFloor.set(new THREE.Vector3(headWorld.x, rig.position.y + STEP_UP, headWorld.z),
+  rayFloor.set(new THREE.Vector3(headWorld.x, floorY + STEP_UP, headWorld.z),
                new THREE.Vector3(0,-1,0));
   rayFloor.near = 0; rayFloor.far = STEP_UP + 2.2;
   const h = rayFloor.intersectObjects(collidables, false);
-  if (h.length) rig.position.y += (h[0].point.y - rig.position.y) * 0.35;
+  if (h.length) floorY += (h[0].point.y - floorY) * 0.35;
+  rig.position.y = floorY + eyeComp;
 }
 
 function turn(angle){
@@ -376,6 +391,7 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
 
   if (renderer.xr.isPresenting){
+    updateEyeHeight();
     const a = axes();
     if (a.reset) resetPose();
 
@@ -401,6 +417,7 @@ renderer.setAnimationLoop(() => {
     followFloor();
 
   } else {
+    eyeComp = 0;
     camera.rotation.set(pitch, yaw, 0, 'YXZ');
     camera.position.set(0, EYE_HEIGHT, 0);
     const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED;
