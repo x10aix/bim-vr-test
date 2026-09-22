@@ -203,12 +203,12 @@ loader.load(MODEL_URL,
     // Startpunkt: von oberhalb der Mitte nach unten schießen und auf dem Boden landen
     startPos.set(mid.x, box.min.y, mid.z);
     const down = new THREE.Raycaster(
-      new THREE.Vector3(mid.x, box.max.y - 0.05, mid.z),
+      new THREE.Vector3(mid.x, mid.y, mid.z),   // halbe Höhe, nicht Dachkante
       new THREE.Vector3(0,-1,0), 0, size.y + 1
     );
     down.firstHitOnly = true;
     const hits = down.intersectObjects(collidables, false);
-    if (hits.length) startPos.y = hits[hits.length-1].point.y;
+    if (hits.length) startPos.y = hits[0].point.y;   // erste Fläche darunter = begehbarer Boden
     resetPose();
 
     // Sichtweite an die Objektgröße anpassen
@@ -367,13 +367,23 @@ function stickTo(dir, amount, dt){
 function followFloor(){
   if (NO_CLIP || !collidables.length) return;
   camera.getWorldPosition(headWorld);
-  rayFloor.set(new THREE.Vector3(headWorld.x, floorY + STEP_UP, headWorld.z),
+  // Vom Kopf aus nach unten: der erste Treffer ist immer die Fläche, auf der
+  // man steht. Ein zu tief geratener Startwert zieht sich damit selbst hoch.
+  const from = Math.max(headWorld.y, floorY + STEP_UP) + 0.3;
+  rayFloor.set(new THREE.Vector3(headWorld.x, from, headWorld.z),
                new THREE.Vector3(0,-1,0));
-  rayFloor.near = 0; rayFloor.far = STEP_UP + 2.2;
+  rayFloor.near = 0; rayFloor.far = from - floorY + 3.0;
   const h = rayFloor.intersectObjects(collidables, false);
-  if (h.length) floorY += (h[0].point.y - floorY) * 0.35;
+  if (h.length) floorY += (h[0].point.y - floorY) * 0.30;
   rig.position.y = floorY + eyeComp;
 }
+
+// Kontrollwerte fuer die Pruefung
+window.__dbg = () => {
+  const w = new THREE.Vector3(); camera.getWorldPosition(w);
+  return { augenhoeheUeberBoden: +(w.y - floorY).toFixed(3),
+           floorY: +floorY.toFixed(3), eyeComp: +eyeComp.toFixed(3) };
+};
 
 function turn(angle){
   camera.getWorldPosition(headWorld);
