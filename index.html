@@ -117,6 +117,8 @@ const SNAP_ANGLE   = THREE.MathUtils.degToRad(30);
 const DEADZONE     = 0.18;
 const NO_CLIP      = P.get('noclip') === '1';
 const NATURAL      = P.get('natural') === '1';  // echte Kopfhöhe der Brille statt fester Augenhöhe
+const HUD_ON       = P.get('hud') !== '0';      // Messanzeige in der Brille; ?hud=0 schaltet sie ab
+const BUILD        = '22.09. 10:13 UTC';
 
 /* ---------- Renderer / Szene ---------- */
 const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
@@ -335,6 +337,54 @@ function updateEyeHeight(){
   if (calib >= CALIB_FRAMES) calib = -1;
 }
 
+/* ---------- Messanzeige in der Brille ---------- */
+// Zahlen statt Vermutungen: die Tafel haengt am Blickfeld und zeigt, wie hoch
+// das Auge ueber dem erkannten Boden steht - in VR direkt ablesbar.
+const hudCv = document.createElement('canvas');
+hudCv.width = 640; hudCv.height = 180;
+const hudCx = hudCv.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCv);
+hudTex.colorSpace = THREE.SRGBColorSpace;
+const hudMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.40, 0.1125),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false })
+);
+hudMesh.position.set(0, -0.17, -0.65);
+hudMesh.renderOrder = 999;
+hudMesh.visible = false;
+camera.add(hudMesh);
+
+let hudAcc = 0;
+function drawHud(dt){
+  hudMesh.visible = HUD_ON && hudVisible && renderer.xr.isPresenting;
+  if (!hudMesh.visible) return;
+  hudAcc += dt; if (hudAcc < 0.2) return; hudAcc = 0;
+
+  const w = new THREE.Vector3(); camera.getWorldPosition(w);
+  const hoehe = w.y - floorY;
+
+  hudCx.clearRect(0,0,640,180);
+  hudCx.fillStyle = 'rgba(14,17,19,0.86)';
+  hudCx.fillRect(0,0,640,180);
+  hudCx.strokeStyle = '#e8703a'; hudCx.lineWidth = 3;
+  hudCx.strokeRect(1.5,1.5,637,177);
+
+  hudCx.fillStyle = hoehe > 1.3 && hoehe < 1.95 ? '#7ddc8a' : '#ff8a5c';
+  hudCx.font = 'bold 62px ui-sans-serif, system-ui, sans-serif';
+  hudCx.fillText(hoehe.toFixed(2).replace('.', ',') + ' m', 22, 72);
+
+  hudCx.fillStyle = '#9aa4a9';
+  hudCx.font = '30px ui-sans-serif, system-ui, sans-serif';
+  hudCx.fillText('Augenhöhe über Boden', 250, 68);
+  hudCx.fillText('Boden ' + floorY.toFixed(2) + '  ·  Ausgleich ' + eyeComp.toFixed(2)
+                 + '  ·  Kopf ' + camera.position.y.toFixed(2), 22, 118);
+  hudCx.fillStyle = '#6f797e';
+  hudCx.font = '26px ui-sans-serif, system-ui, sans-serif';
+  hudCx.fillText('Stand ' + BUILD + '   ·   Y blendet aus', 22, 158);
+
+  hudTex.needsUpdate = true;
+}
+
 /* ---------- Bewegung mit Boden- und Wandprüfung ---------- */
 const UP        = new THREE.Vector3(0,1,0);
 const headWorld = new THREE.Vector3();
@@ -344,6 +394,8 @@ const flatRight = new THREE.Vector3();
 const rayWall   = new THREE.Raycaster(); rayWall.firstHitOnly = true;
 const rayFloor  = new THREE.Raycaster(); rayFloor.firstHitOnly = true;
 let snapCooldown = false;
+let hudCooldown  = false;
+let hudVisible   = true;
 
 function blocked(from, dir, dist){
   if (NO_CLIP || !collidables.length) return false;
@@ -393,7 +445,7 @@ function turn(angle){
 
 function axes(){
   // Liefert {move:{x,y}, turnX, fast, reset} aus den Quest-Controllern
-  const out = { mx:0, my:0, tx:0, fast:false, reset:false };
+  const out = { mx:0, my:0, tx:0, fast:false, reset:false, hud:false };
   const s = renderer.xr.getSession();
   if (!s) return out;
   for (const src of s.inputSources){
@@ -405,6 +457,7 @@ function axes(){
     else if (src.handedness === 'right'){ out.tx = sx||0; }
     if (gp.buttons[0]?.pressed) out.fast = true;              // Trigger
     if (gp.buttons[4]?.pressed) out.reset = true;             // A / X
+    if (gp.buttons[5]?.pressed) out.hud   = true;             // B / Y
   }
   return out;
 }
@@ -419,6 +472,8 @@ renderer.setAnimationLoop(() => {
     updateEyeHeight();
     const a = axes();
     if (a.reset) resetPose();
+    if (a.hud && !hudCooldown){ hudMesh.visible = !hudMesh.visible; hudVisible = hudMesh.visible;
+      hudCooldown = true; setTimeout(() => hudCooldown = false, 400); }
 
     const speed = a.fast ? RUN_SPEED : WALK_SPEED;
     camera.getWorldDirection(flatFwd);
@@ -458,6 +513,7 @@ renderer.setAnimationLoop(() => {
     followFloor();
   }
 
+  drawHud(dt);
   renderer.render(scene, camera);
 });
 
