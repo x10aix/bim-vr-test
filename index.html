@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Virtuelle Begehung</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230e1113'/%3E%3Cpath d='M6 18 16 9l10 9v7a1 1 0 0 1-1 1h-6v-6h-6v6H7a1 1 0 0 1-1-1z' fill='%23e8703a'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0e1113; --fg:#f2f4f5; --muted:#9aa4a9; --line:#252b2f; --accent:#e8703a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    overflow:hidden;overscroll-behavior:none}
+  canvas{display:block}
+  #ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:16px;background:radial-gradient(120% 90% at 50% 0%,#182024 0%,#0e1113 70%);
+    z-index:10;transition:opacity .45s ease}
+  #ui.gone{opacity:0;pointer-events:none}
+  #ui.hidden{display:none}
+  /* three.js hängt seinen eigenen VR-Button an den Body – wir nutzen nur dessen Logik */
+  body > button.xr-hidden{display:none!important}
+  .card{width:100%;max-width:560px;border:1px solid var(--line);border-radius:14px;
+    background:#13181b;padding:28px 26px}
+  h1{margin:0 0 4px;font-size:1.35rem;letter-spacing:-.01em;font-weight:600}
+  .sub{margin:0 0 20px;color:var(--muted);font-size:.9rem}
+  .bar{height:4px;background:#1e2529;border-radius:99px;overflow:hidden;margin:18px 0 8px}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .25s}
+  .status{font-size:.82rem;color:var(--muted);min-height:1.2em;font-variant-numeric:tabular-nums}
+  .keys{margin:20px 0 0;border-top:1px solid var(--line);padding-top:16px;
+    display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:.84rem}
+  .keys b{color:var(--fg);font-weight:600;white-space:nowrap}
+  .keys span{color:var(--muted)}
+  #enter{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+  button{font:inherit;font-size:.92rem;padding:11px 18px;border-radius:9px;cursor:pointer;
+    border:1px solid var(--line);background:#1b2226;color:var(--fg);transition:.15s}
+  button:hover:not(:disabled){border-color:#3a4449}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#1a0d06;font-weight:600}
+  button.primary:hover:not(:disabled){filter:brightness(1.08)}
+  button:disabled{opacity:.4;cursor:default}
+  #hint{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:5;
+    font-size:.8rem;color:var(--muted);background:rgba(14,17,19,.82);
+    border:1px solid var(--line);border-radius:8px;padding:7px 14px;
+    opacity:0;transition:opacity .4s;pointer-events:none;text-align:center}
+  #hint.show{opacity:1}
+  .note{margin-top:14px;font-size:.78rem;color:#6f797e;line-height:1.5}
+  @media (max-width:520px){ .card{padding:22px 18px} }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div class="card">
+    <h1>Virtuelle Begehung</h1>
+    <p class="sub" id="sub">Modell wird geladen …</p>
+    <div class="bar"><i id="barfill"></i></div>
+    <div class="status" id="status">Verbinde …</div>
+
+    <div id="enter">
+      <button id="btn-vr" class="primary" disabled>In VR betreten</button>
+      <button id="btn-desktop" disabled>Am Bildschirm ansehen</button>
+    </div>
+
+    <div class="keys" id="keys-vr" style="display:none">
+      <b>Linker Stick</b><span>Gehen</span>
+      <b>Rechter Stick</b><span>Drehen in 30°-Schritten</span>
+      <b>Trigger halten</b><span>Schneller gehen</span>
+      <b>A / X</b><span>Zurück zum Startpunkt</span>
+    </div>
+    <div class="keys" id="keys-pc" style="display:none">
+      <b>W A S D</b><span>Gehen</span>
+      <b>Maus</b><span>Umsehen (klicken zum Aktivieren)</span>
+      <b>Shift</b><span>Schneller gehen</span>
+      <b>R</b><span>Zurück zum Startpunkt</span>
+    </div>
+
+    <p class="note" id="note"></p>
+  </div>
+</div>
+
+<div id="hint"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js",
+    "three/addons/": "./vendor/addons/",
+    "three-mesh-bvh": "./vendor/three-mesh-bvh.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder }  from 'three/addons/libs/meshopt_decoder.module.js';
+import { VRButton }        from 'three/addons/webxr/VRButton.js';
+import { RoomEnvironment } from 'three/addons/RoomEnvironment.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+/* ---------- BVH beschleunigt die Kollisionsabfragen ---------- */
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+/* ---------- Parameter ---------- */
+const P            = new URLSearchParams(location.search);
+const MODEL_URL    = P.get('model') || './model.glb';
+const EYE_HEIGHT   = 1.65;   // m, nur Desktop – in VR liefert das Headset die echte Höhe
+const WALK_SPEED   = 1.5;    // m/s
+const RUN_SPEED    = 3.2;
+const BODY_RADIUS  = 0.32;   // m, Abstand zu Wänden
+const STEP_UP      = 0.45;   // m, überwindbare Stufenhöhe
+const SNAP_ANGLE   = THREE.MathUtils.degToRad(30);
+const DEADZONE     = 0.18;
+const NO_CLIP      = P.get('noclip') === '1';
+
+/* ---------- Renderer / Szene ---------- */
+const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x9fb4c4);
+scene.fog = new THREE.Fog(0x9fb4c4, 40, 140);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.08, 400);
+const rig    = new THREE.Group();          // der „Spieler“ – in VR wird das Rig bewegt
+rig.add(camera);
+scene.add(rig);
+
+// Licht: bewusst ohne Schatten – kostet auf der Quest zu viel
+scene.add(new THREE.HemisphereLight(0xdceaf5, 0x50463c, 2.0));
+const sun = new THREE.DirectionalLight(0xfff2e0, 1.7);
+sun.position.set(12, 24, 9);
+scene.add(sun);
+
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------- UI ---------- */
+const ui   = document.getElementById('ui');
+const sub  = document.getElementById('sub');
+const fill = document.getElementById('barfill');
+const stat = document.getElementById('status');
+const note = document.getElementById('note');
+const hint = document.getElementById('hint');
+const btnVR = document.getElementById('btn-vr');
+const btnPC = document.getElementById('btn-desktop');
+
+function showHint(t, ms = 3200){
+  hint.textContent = t; hint.classList.add('show');
+  clearTimeout(showHint._t);
+  showHint._t = setTimeout(() => hint.classList.remove('show'), ms);
+}
+
+/* ---------- Modell laden ---------- */
+const collidables = [];
+let startPos = new THREE.Vector3(0, 0, 0);
+
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+
+loader.load(MODEL_URL,
+  gltf => {
+    const model = gltf.scene;
+    scene.add(model);
+    model.updateWorldMatrix(true, true);
+
+    let tris = 0;
+    model.traverse(o => {
+      if (!o.isMesh) return;
+      o.frustumCulled = true;
+      const g = o.geometry;
+      if (g.index) tris += g.index.count/3; else tris += g.attributes.position.count/3;
+      g.computeBoundsTree({ maxLeafTris: 8 });
+      collidables.push(o);
+    });
+
+    const box  = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const mid  = box.getCenter(new THREE.Vector3());
+
+    // Startpunkt: von oberhalb der Mitte nach unten schießen und auf dem Boden landen
+    startPos.set(mid.x, box.min.y, mid.z);
+    const down = new THREE.Raycaster(
+      new THREE.Vector3(mid.x, box.max.y - 0.05, mid.z),
+      new THREE.Vector3(0,-1,0), 0, size.y + 1
+    );
+    down.firstHitOnly = true;
+    const hits = down.intersectObjects(collidables, false);
+    if (hits.length) startPos.y = hits[hits.length-1].point.y;
+    resetPose();
+
+    // Sichtweite an die Objektgröße anpassen
+    const span = Math.max(size.x, size.z);
+    scene.fog.near = span * 0.9;
+    scene.fog.far  = span * 3.2;
+    camera.far     = span * 6 + 50;
+    camera.updateProjectionMatrix();
+
+    sub.textContent = 'Bereit.';
+    stat.textContent =
+      `${(tris/1000).toFixed(0)}k Dreiecke · Ausdehnung ${size.x.toFixed(1)} × ${size.z.toFixed(1)} m · Höhe ${size.y.toFixed(1)} m`;
+    fill.style.width = '100%';
+    btnPC.disabled = false;
+    checkXR();
+  },
+  ev => {
+    if (ev.lengthComputable){
+      const p = ev.loaded/ev.total;
+      fill.style.width = (p*100).toFixed(0)+'%';
+      stat.textContent = `${(ev.loaded/1048576).toFixed(1)} / ${(ev.total/1048576).toFixed(1)} MB`;
+    } else {
+      stat.textContent = `${(ev.loaded/1048576).toFixed(1)} MB geladen`;
+    }
+  },
+  err => {
+    sub.textContent = 'Modell konnte nicht geladen werden.';
+    stat.textContent = String(err?.message || err);
+    fill.style.background = '#c0392b';
+  }
+);
+
+/* ---------- WebXR verfügbar? ---------- */
+async function checkXR(){
+  if (!navigator.xr){
+    note.textContent = 'Dieser Browser unterstützt kein WebXR. Am Bildschirm funktioniert die Begehung trotzdem.';
+    document.getElementById('keys-pc').style.display = 'grid';
+    return;
+  }
+  let ok = false;
+  try { ok = await navigator.xr.isSessionSupported('immersive-vr'); } catch(e){}
+  if (ok){
+    btnVR.disabled = false;
+    document.getElementById('keys-vr').style.display = 'grid';
+    note.textContent = 'Brille aufsetzen, „In VR betreten" drücken. Danach zeigt die Brille das Gebäude im Maßstab 1:1.';
+  } else {
+    note.textContent = 'Keine VR-Brille erkannt. Am Bildschirm funktioniert die Begehung trotzdem – für VR diese Seite im Browser der Meta Quest öffnen.';
+    document.getElementById('keys-pc').style.display = 'grid';
+  }
+}
+
+// VRButton erzeugt die Session korrekt inkl. Feature-Anforderungen
+const vrButton = VRButton.createButton(renderer, {
+  optionalFeatures: ['local-floor','bounded-floor','hand-tracking','layers']
+});
+vrButton.classList.add('xr-hidden');   // Klasse statt style: three.js überschreibt style.display
+document.body.appendChild(vrButton);
+
+// Overlay hart ausblenden statt nur transparent schalten – eine hängende
+// CSS-Transition darf die Begehung nicht blockieren
+let hideTimer = null;
+function closeOverlay(){
+  ui.classList.add('gone');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => ui.classList.add('hidden'), 500);
+}
+function openOverlay(){
+  clearTimeout(hideTimer);
+  ui.classList.remove('hidden');
+  requestAnimationFrame(() => ui.classList.remove('gone'));
+}
+
+btnVR.onclick = () => { vrButton.click(); closeOverlay(); };
+btnPC.onclick = () => { closeOverlay(); mode = 'pc'; showHint('Klicken zum Umsehen · W A S D zum Gehen'); };
+
+renderer.xr.addEventListener('sessionend', openOverlay);
+
+/* ---------- Desktop-Steuerung ---------- */
+let mode = 'pc';
+let yaw = 0, pitch = 0;
+const keys = new Set();
+
+addEventListener('keydown', e => {
+  keys.add(e.code);
+  if (e.code === 'KeyR') resetPose();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+
+renderer.domElement.addEventListener('click', () => {
+  if (!renderer.xr.isPresenting) renderer.domElement.requestPointerLock();
+});
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw   -= e.movementX * 0.0022;
+  pitch -= e.movementY * 0.0022;
+  pitch  = THREE.MathUtils.clamp(pitch, -1.35, 1.35);
+});
+
+function resetPose(){
+  rig.position.copy(startPos);
+  rig.rotation.set(0,0,0);
+  yaw = 0; pitch = 0;
+}
+
+/* ---------- Bewegung mit Boden- und Wandprüfung ---------- */
+const UP        = new THREE.Vector3(0,1,0);
+const headWorld = new THREE.Vector3();
+const moveDir   = new THREE.Vector3();
+const flatFwd   = new THREE.Vector3();
+const flatRight = new THREE.Vector3();
+const rayWall   = new THREE.Raycaster(); rayWall.firstHitOnly = true;
+const rayFloor  = new THREE.Raycaster(); rayFloor.firstHitOnly = true;
+let snapCooldown = false;
+
+function blocked(from, dir, dist){
+  if (NO_CLIP || !collidables.length) return false;
+  rayWall.set(from, dir);
+  rayWall.near = 0; rayWall.far = dist + BODY_RADIUS;
+  const h = rayWall.intersectObjects(collidables, false);
+  return h.length > 0;
+}
+
+function stickTo(dir, amount, dt){
+  if (amount < DEADZONE) return;
+  const dist = amount * dt;
+  camera.getWorldPosition(headWorld);
+  // Prüfhöhen: Brust und Knie – verhindert Durchlaufen von Wänden und Brüstungen
+  const chest = headWorld.clone(); chest.y = rig.position.y + 1.1;
+  const knee  = headWorld.clone(); knee.y  = rig.position.y + 0.45;
+  if (blocked(chest, dir, dist) || blocked(knee, dir, dist)) return;
+  rig.position.addScaledVector(dir, dist);
+}
+
+function followFloor(){
+  if (NO_CLIP || !collidables.length) return;
+  camera.getWorldPosition(headWorld);
+  rayFloor.set(new THREE.Vector3(headWorld.x, rig.position.y + STEP_UP, headWorld.z),
+               new THREE.Vector3(0,-1,0));
+  rayFloor.near = 0; rayFloor.far = STEP_UP + 2.2;
+  const h = rayFloor.intersectObjects(collidables, false);
+  if (h.length) rig.position.y += (h[0].point.y - rig.position.y) * 0.35;
+}
+
+function turn(angle){
+  camera.getWorldPosition(headWorld);
+  rig.position.sub(headWorld).applyAxisAngle(UP, angle).add(headWorld);
+  rig.rotation.y += angle;
+}
+
+function axes(){
+  // Liefert {move:{x,y}, turnX, fast, reset} aus den Quest-Controllern
+  const out = { mx:0, my:0, tx:0, fast:false, reset:false };
+  const s = renderer.xr.getSession();
+  if (!s) return out;
+  for (const src of s.inputSources){
+    const gp = src.gamepad; if (!gp) continue;
+    const a = gp.axes;
+    const sx = a.length > 2 ? a[2] : a[0];
+    const sy = a.length > 3 ? a[3] : a[1];
+    if (src.handedness === 'left'){ out.mx = sx||0; out.my = sy||0; }
+    else if (src.handedness === 'right'){ out.tx = sx||0; }
+    if (gp.buttons[0]?.pressed) out.fast = true;              // Trigger
+    if (gp.buttons[4]?.pressed) out.reset = true;             // A / X
+  }
+  return out;
+}
+
+/* ---------- Schleife ---------- */
+const clock = new THREE.Clock();
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+
+  if (renderer.xr.isPresenting){
+    const a = axes();
+    if (a.reset) resetPose();
+
+    const speed = a.fast ? RUN_SPEED : WALK_SPEED;
+    camera.getWorldDirection(flatFwd);
+    flatFwd.y = 0; flatFwd.normalize();
+    flatRight.crossVectors(flatFwd, UP).normalize();
+
+    if (Math.abs(a.my) > DEADZONE){
+      moveDir.copy(flatFwd).multiplyScalar(-Math.sign(a.my));
+      stickTo(moveDir, Math.abs(a.my) * speed, dt);
+    }
+    if (Math.abs(a.mx) > DEADZONE){
+      moveDir.copy(flatRight).multiplyScalar(Math.sign(a.mx));
+      stickTo(moveDir, Math.abs(a.mx) * speed, dt);
+    }
+    // Snap-Turn: sprunghaft statt weich – deutlich weniger Übelkeit
+    if (Math.abs(a.tx) > 0.7 && !snapCooldown){
+      turn(-Math.sign(a.tx) * SNAP_ANGLE);
+      snapCooldown = true;
+      setTimeout(() => snapCooldown = false, 220);
+    }
+    followFloor();
+
+  } else {
+    camera.rotation.set(pitch, yaw, 0, 'YXZ');
+    camera.position.set(0, EYE_HEIGHT, 0);
+    const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED;
+    flatFwd.set(-Math.sin(yaw), 0, -Math.cos(yaw));
+    flatRight.crossVectors(flatFwd, UP).normalize();
+    let f = 0, r = 0;
+    if (keys.has('KeyW') || keys.has('ArrowUp'))    f += 1;
+    if (keys.has('KeyS') || keys.has('ArrowDown'))  f -= 1;
+    if (keys.has('KeyD') || keys.has('ArrowRight')) r += 1;
+    if (keys.has('KeyA') || keys.has('ArrowLeft'))  r -= 1;
+    if (f) stickTo(moveDir.copy(flatFwd).multiplyScalar(f), speed, dt);
+    if (r) stickTo(moveDir.copy(flatRight).multiplyScalar(r), speed, dt);
+    followFloor();
+  }
+
+  renderer.render(scene, camera);
+});
+
+window.__ready = true;
+</script>
+</body>
+</html>
