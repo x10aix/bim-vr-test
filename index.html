@@ -66,7 +66,7 @@
       <b>Linker Stick</b><span>Gehen</span>
       <b>Rechter Stick</b><span>Drehen in 30°-Schritten</span>
       <b>Trigger halten</b><span>Schneller gehen</span>
-      <b>A / X</b><span>Zurück zum Startpunkt</span>
+      <b>A / X</b><span>Zurück zum Start, misst die Augenhöhe neu</span>
       <b>Augenhöhe</b><span id="eyeinfo">1,60 m</span>
     </div>
     <div class="keys" id="keys-pc" style="display:none">
@@ -116,6 +116,7 @@ const STEP_UP      = 0.45;   // m, überwindbare Stufenhöhe
 const SNAP_ANGLE   = THREE.MathUtils.degToRad(30);
 const DEADZONE     = 0.18;
 const NO_CLIP      = P.get('noclip') === '1';
+const NATURAL      = P.get('natural') === '1';  // echte Kopfhöhe der Brille statt fester Augenhöhe
 
 /* ---------- Renderer / Szene ---------- */
 const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
@@ -172,7 +173,10 @@ function showHint(t, ms = 3200){
 const collidables = [];
 let startPos = new THREE.Vector3(0, 0, 0);
 let floorY   = 0;   // Höhe des Bodens unter dem Betrachter
-let eyeComp  = 0;   // Ausgleich, falls die Brille keine Bodenreferenz liefert
+let eyeComp  = 0;   // Ausgleich zwischen Kopfhöhe der Brille und gewünschter Augenhöhe
+let calib    = -1;  // >= 0 solange kalibriert wird
+let calibSum = 0;
+const CALIB_FRAMES = 30;
 
 const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
 
@@ -251,7 +255,7 @@ async function checkXR(){
   if (ok){
     btnVR.disabled = false;
     document.getElementById('keys-vr').style.display = 'grid';
-    note.textContent = 'Brille aufsetzen, „In VR betreten" drücken. Danach zeigt die Brille das Gebäude im Maßstab 1:1.';
+    note.textContent = 'Brille aufsetzen, „In VR betreten" drücken. Steh oder sitz beim Betreten ruhig – die ersten Sekundenbruchteile legen die Augenhöhe fest. Mit A bzw. X jederzeit neu messen.';
   } else {
     note.textContent = 'Keine VR-Brille erkannt. Am Bildschirm funktioniert die Begehung trotzdem – für VR diese Seite im Browser der Meta Quest öffnen.';
     document.getElementById('keys-pc').style.display = 'grid';
@@ -283,6 +287,7 @@ btnVR.onclick = () => { vrButton.click(); closeOverlay(); };
 btnPC.onclick = () => { closeOverlay(); mode = 'pc'; showHint('Klicken zum Umsehen · W A S D zum Gehen'); };
 
 renderer.xr.addEventListener('sessionend', openOverlay);
+renderer.xr.addEventListener('sessionstart', beginCalibration);
 
 /* ---------- Desktop-Steuerung ---------- */
 let mode = 'pc';
@@ -310,14 +315,24 @@ function resetPose(){
   floorY = startPos.y;
   rig.rotation.set(0,0,0);
   yaw = 0; pitch = 0;
+  if (renderer.xr.isPresenting) beginCalibration();
 }
 
-// Liefert die Brille 'local-floor', steht das Auge schon richtig über dem Rig-
-// Ursprung. Tut sie das nicht (Quest fällt dann auf 'local' zurück), sitzt es
-// bei 0 – und der Betrachter klebt am Boden. Das gleichen wir hier aus.
+// Die Brille meldet die ECHTE Kopfhöhe des Trägers – im Sitzen also rund 1,10 m.
+// Für eine Gebäudebegehung ist das falsch: die Augenhöhe soll von der Haltung
+// unabhängig sein. Beim Betreten messen wir die Ausgangshöhe über ein paar
+// Frames und merken uns die Differenz zur Wunschhöhe. Danach bleibt der
+// Versatz fest – wer sich physisch aufrichtet oder duckt, bewegt sich weiterhin
+// natürlich, nur eben ab der richtigen Grundhöhe.
+function beginCalibration(){ calib = 0; calibSum = 0; }
+
 function updateEyeHeight(){
-  const localEye = camera.position.y;
-  eyeComp = localEye < 0.6 ? (EYE_HEIGHT - localEye) : 0;
+  if (NATURAL){ eyeComp = 0; return; }
+  if (calib < 0) return;
+  calibSum += camera.position.y;
+  calib++;
+  eyeComp = THREE.MathUtils.clamp(EYE_HEIGHT - calibSum / calib, -1.5, 2.5);
+  if (calib >= CALIB_FRAMES) calib = -1;
 }
 
 /* ---------- Bewegung mit Boden- und Wandprüfung ---------- */
