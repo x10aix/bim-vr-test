@@ -66,8 +66,8 @@
       <b>Linker Stick</b><span>Gehen</span>
       <b>Rechter Stick</b><span>Drehen in 30°-Schritten</span>
       <b>Trigger halten</b><span>Schneller gehen</span>
-      <b>A / X</b><span>Zurück zum Start, misst die Augenhöhe neu</span>
-      <b>Augenhöhe</b><span id="eyeinfo">1,60 m</span>
+      <b>A / X</b><span>Zurück zum Startpunkt</span>
+      <b>Y</b><span>Messanzeige aus- und einblenden</span>
     </div>
     <div class="keys" id="keys-pc" style="display:none">
       <b>W A S D</b><span>Gehen</span>
@@ -116,9 +116,9 @@ const STEP_UP      = 0.45;   // m, überwindbare Stufenhöhe
 const SNAP_ANGLE   = THREE.MathUtils.degToRad(30);
 const DEADZONE     = 0.18;
 const NO_CLIP      = P.get('noclip') === '1';
-const NATURAL      = P.get('natural') === '1';  // echte Kopfhöhe der Brille statt fester Augenhöhe
+const FIXED        = P.get('fix') === '1';     // Augenhöhe starr auf EYE_HEIGHT, unabhängig von der Haltung
 const HUD_ON       = P.get('hud') !== '0';      // Messanzeige in der Brille; ?hud=0 schaltet sie ab
-const BUILD        = '22.09. 10:13 UTC';
+const BUILD        = '22.09. 10:16 UTC';
 
 /* ---------- Renderer / Szene ---------- */
 const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
@@ -220,8 +220,6 @@ loader.load(MODEL_URL,
     camera.far     = span * 6 + 50;
     camera.updateProjectionMatrix();
 
-    const ei = document.getElementById('eyeinfo');
-    if (ei) ei.textContent = EYE_HEIGHT.toFixed(2).replace('.', ',') + ' m';
     sub.textContent = 'Bereit.';
     stat.textContent =
       `${(tris/1000).toFixed(0)}k Dreiecke · Ausdehnung ${size.x.toFixed(1)} × ${size.z.toFixed(1)} m · Höhe ${size.y.toFixed(1)} m`;
@@ -257,7 +255,7 @@ async function checkXR(){
   if (ok){
     btnVR.disabled = false;
     document.getElementById('keys-vr').style.display = 'grid';
-    note.textContent = 'Brille aufsetzen, „In VR betreten" drücken. Steh oder sitz beim Betreten ruhig – die ersten Sekundenbruchteile legen die Augenhöhe fest. Mit A bzw. X jederzeit neu messen.';
+    note.textContent = 'Brille aufsetzen, „In VR betreten" drücken. Die Augenhöhe kommt von der Brille selbst. Für eine Begehung im Sitzen ?fix=1 an die Adresse hängen – dann wird sie beim Betreten gemessen und festgehalten.';
   } else {
     note.textContent = 'Keine VR-Brille erkannt. Am Bildschirm funktioniert die Begehung trotzdem – für VR diese Seite im Browser der Meta Quest öffnen.';
     document.getElementById('keys-pc').style.display = 'grid';
@@ -320,21 +318,30 @@ function resetPose(){
   if (renderer.xr.isPresenting) beginCalibration();
 }
 
-// Die Brille meldet die ECHTE Kopfhöhe des Trägers – im Sitzen also rund 1,10 m.
-// Für eine Gebäudebegehung ist das falsch: die Augenhöhe soll von der Haltung
-// unabhängig sein. Beim Betreten messen wir die Ausgangshöhe über ein paar
-// Frames und merken uns die Differenz zur Wunschhöhe. Danach bleibt der
-// Versatz fest – wer sich physisch aufrichtet oder duckt, bewegt sich weiterhin
-// natürlich, nur eben ab der richtigen Grundhöhe.
+// Meldet die Brille eine brauchbare Kopfhöhe, ist die auch die richtige –
+// dann wird nichts korrigiert, und Aufrichten oder Ducken wirkt 1:1.
+// Nur wenn die Bodenreferenz fehlt (Quest fällt auf 'local' zurück und meldet
+// eine Kopfhöhe nahe 0), setzen wir die Augenhöhe selbst.
+// Mit ?fix=1 wird sie beim Betreten einmal gemessen und danach starr gehalten –
+// sinnvoll, wenn jemand die Begehung im Sitzen macht.
+const HEAD_PLAUSIBEL = 1.0;   // m; darunter traut die Brille sich selbst nicht
+
 function beginCalibration(){ calib = 0; calibSum = 0; }
 
 function updateEyeHeight(){
-  if (NATURAL){ eyeComp = 0; return; }
-  if (calib < 0) return;
-  calibSum += camera.position.y;
-  calib++;
-  eyeComp = THREE.MathUtils.clamp(EYE_HEIGHT - calibSum / calib, -1.5, 2.5);
-  if (calib >= CALIB_FRAMES) calib = -1;
+  const head = camera.position.y;
+
+  if (!FIXED && head >= HEAD_PLAUSIBEL){
+    eyeComp = 0;                      // Brille liegt richtig, Finger weg
+    return;
+  }
+  if (calib >= 0){                    // laufende Messung beim Betreten
+    calibSum += head; calib++;
+    eyeComp = THREE.MathUtils.clamp(EYE_HEIGHT - calibSum / calib, -1.5, 2.5);
+    if (calib >= CALIB_FRAMES) calib = -1;
+  } else if (!FIXED){
+    eyeComp = EYE_HEIGHT - head;      // Notfall ohne Bodenreferenz: laufend führen
+  }
 }
 
 /* ---------- Messanzeige in der Brille ---------- */
@@ -377,7 +384,8 @@ function drawHud(dt){
   hudCx.font = '30px ui-sans-serif, system-ui, sans-serif';
   hudCx.fillText('Augenhöhe über Boden', 250, 68);
   hudCx.fillText('Boden ' + floorY.toFixed(2) + '  ·  Ausgleich ' + eyeComp.toFixed(2)
-                 + '  ·  Kopf ' + camera.position.y.toFixed(2), 22, 118);
+                 + '  ·  Kopf ' + camera.position.y.toFixed(2)
+                 + (FIXED ? '  ·  starr' : ''), 22, 118);
   hudCx.fillStyle = '#6f797e';
   hudCx.font = '26px ui-sans-serif, system-ui, sans-serif';
   hudCx.fillText('Stand ' + BUILD + '   ·   Y blendet aus', 22, 158);
